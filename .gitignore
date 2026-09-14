@@ -1,0 +1,11 @@
+.pio
+.vscode/.browse.c_cpp.db*
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/ipch
+
+# Generated from models/current.tflite by tools/import_tflite.py.
+# current.tflite is the source of truth and stays tracked; the 5 MB hex dump
+# it expands into does not.
+src/policy/model_data.cpp
+include/model_data.h
