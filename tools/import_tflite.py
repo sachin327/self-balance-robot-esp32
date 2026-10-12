@@ -31,8 +31,8 @@ HPP_PATH    = os.path.join(PROJECT_DIR, "include", "model_data.h")
 CPP_PATH    = os.path.join(PROJECT_DIR, "src", "policy", "model_data.cpp")
 
 # Must match include/robot_config.h.
-EXPECT_IN  = 9
-EXPECT_OUT = 13
+EXPECT_IN  = 10
+EXPECT_OUT = 1
 
 # huge_app.csv app partition, minus room for the Arduino core + TFLM (~350 KB).
 APP_PARTITION_BYTES = 3 * 1024 * 1024

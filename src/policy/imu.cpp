@@ -90,35 +90,54 @@ bool Imu::begin() {
   return true;
 }
 
-void Imu::calibrateGyro(int samples) {
+bool Imu::calibrateGyro() {
+  constexpr int kSettle = 40;    // discarded: lets the DLPF and timing settle
+  constexpr int kSamples = 400;  // 2 s at the control rate
+
   double sx = 0.0, sy = 0.0, sz = 0.0;
+  float lo[3] = { 1e9f,  1e9f,  1e9f};
+  float hi[3] = {-1e9f, -1e9f, -1e9f};
+  float min_trust = 1.0f;
+  int taken = 0;
   ImuReading r;
 
-  // Discard the first reads — the DLPF needs a few samples to settle.
-  for (int i = 0; i < 50; i++) { read(r); delay(2); }
-
-  int taken = 0;
-  for (int i = 0; i < samples; i++) {
-    if (read(r)) {
-      // read() already subtracts the current bias, which is zero on the first
-      // calibration; accumulating the residual makes a re-run refine rather
-      // than fight the previous estimate.
-      sx += r.wx; sy += r.wy; sz += r.wz;
-      taken++;
+  // Same pattern as the control loop: spin until the tick, then one read.
+  uint32_t next = micros();
+  for (int i = 0; i < kSettle + kSamples; i++) {
+    while ((int32_t)(micros() - next) < 0) {}
+    next += CONTROL_DT_US;
+    if (!read(r) || i < kSettle) continue;
+    // read() already subtracts the current bias, so this accumulates the
+    // residual and a re-run refines the previous estimate.
+    const float w[3] = {r.wx, r.wy, r.wz};
+    for (int k = 0; k < 3; k++) {
+      if (w[k] < lo[k]) lo[k] = w[k];
+      if (w[k] > hi[k]) hi[k] = w[k];
     }
-    delay(2);
+    const float trust = accelTrust(r.ax, r.ay, r.az);
+    if (trust < min_trust) min_trust = trust;
+    sx += r.wx; sy += r.wy; sz += r.wz;
+    taken++;
   }
-  if (taken == 0) {
-    Serial.println("IMU: gyro calibration read nothing");
-    return;
+  if (taken < kSamples / 2) {
+    Serial.println("IMU: gyro calibration could not read the sensor");
+    return false;
+  }
+  const float range = fmaxf(hi[0] - lo[0], fmaxf(hi[1] - lo[1], hi[2] - lo[2]));
+  if (range > GYRO_CAL_MAX_RANGE || min_trust < FILTER_SEED_MIN_TRUST) {
+    Serial.printf("IMU: robot moved during calibration (gyro range %.3f rad/s, "
+                  "accel trust %.2f) — not used\n", range, min_trust);
+    return false;
   }
 
   bias_wx_ += (float)(sx / taken);
   bias_wy_ += (float)(sy / taken);
   bias_wz_ += (float)(sz / taken);
 
-  Serial.printf("IMU: gyro bias %.5f %.5f %.5f rad/s (%d samples)\n",
-                bias_wx_, bias_wy_, bias_wz_, taken);
+  Serial.printf("IMU: gyro bias %.5f %.5f %.5f rad/s (%d samples at %d Hz, I2C %lu Hz)\n",
+                bias_wx_, bias_wy_, bias_wz_, taken, (int)(1000000UL / CONTROL_DT_US),
+                (unsigned long)I2C_FREQ_HZ);
+  return true;
 }
 
 bool Imu::read(ImuReading &out) {
@@ -152,6 +171,15 @@ float Imu::accelTrust(float ax, float ay, float az) {
   const float span = ACCEL_TRUST_ZERO_BAND - ACCEL_TRUST_FULL_BAND;
   const float t = 1.0f - (mag_error - ACCEL_TRUST_FULL_BAND) / span;
   return t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+}
+
+bool Imu::trySeed(const ImuReading &r, float min_trust) {
+  if (accelTrust(r.ax, r.ay, r.az) < min_trust) return false;
+  pitch_ = atan2f(-r.ax, r.az);   // same axis convention as update()
+  roll_  = atan2f( r.ay, r.az);
+  pitch_rate_ = r.wy;             // so the first trapezoid step is consistent
+  roll_rate_  = r.wx;
+  return true;
 }
 
 void Imu::update(const ImuReading &r, float dt, bool init) {

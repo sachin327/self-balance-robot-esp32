@@ -1,5 +1,7 @@
 #include "encoders.h"
 
+#include <math.h>
+
 #include "robot_config.h"
 
 namespace {
@@ -67,8 +69,12 @@ void Encoders::resetCounts() {
   g_count1 = 0;
   g_count2 = 0;
   interrupts();
-  last1_ = 0;
-  last2_ = 0;
+  for (int i = 0; i <= ENC_WINDOW_TICKS; i++) {
+    ring1_[i] = 0;
+    ring2_[i] = 0;
+  }
+  ring_head_ = 0;
+  ring_fill_ = 0;
   vel1_ = 0.0f;
   vel2_ = 0.0f;
 }
@@ -77,16 +83,42 @@ void Encoders::update(float dt) {
   const int32_t c1 = count1();
   const int32_t c2 = count2();
 
-  const int32_t d1 = c1 - last1_;
-  const int32_t d2 = c2 - last2_;
-  last1_ = c1;
-  last2_ = c2;
+  // Advance the ring, then read back the sample ENC_WINDOW_TICKS entries ago.
+  // With ENC_WINDOW_TICKS + 1 slots the tail is exactly one window behind the
+  // head once the ring has filled.
+  ring_head_ = (ring_head_ + 1) % (ENC_WINDOW_TICKS + 1);
+  ring1_[ring_head_] = c1;
+  ring2_[ring_head_] = c2;
+  if (ring_fill_ <= ENC_WINDOW_TICKS) ring_fill_++;
 
-  // counts -> revolutions -> rad/s
-  const float scale = (2.0f * PI) / (ENCODER_COUNTS_PER_REV * dt);
-  const float raw1 = ENC1_SIGN * d1 * scale;
-  const float raw2 = ENC2_SIGN * d2 * scale;
+  // Until the ring fills — the first 4 ticks after boot or an arm — measure over
+  // however many samples exist. Velocity is briefly noisier rather than wrong,
+  // and it resolves within 20 ms.
+  const int span = (ring_fill_ > ENC_WINDOW_TICKS) ? ENC_WINDOW_TICKS
+                                                   : (ring_fill_ - 1);
+  if (span <= 0) {
+    vel1_ = 0.0f;
+    vel2_ = 0.0f;
+    return;
+  }
 
-  vel1_ += ENC_VEL_EMA_ALPHA * (raw1 - vel1_);
-  vel2_ += ENC_VEL_EMA_ALPHA * (raw2 - vel2_);
+  const int tail = (ring_head_ - span + (ENC_WINDOW_TICKS + 1)) %
+                   (ENC_WINDOW_TICKS + 1);
+  const int32_t d1 = c1 - ring1_[tail];
+  const int32_t d2 = c2 - ring2_[tail];
+
+  // counts -> revolutions -> rad/s, over the window rather than a single tick
+  const float window_s = dt * (float)span;
+  const float scale = (2.0f * PI) / (ENCODER_COUNTS_PER_REV * window_s);
+  float w1 = ENC1_SIGN * d1 * scale;
+  float w2 = ENC2_SIGN * d2 * scale;
+
+  // Quantise last, exactly as train.py:768-770 does, and unconditionally: the
+  // staircase is hardware, not noise. obs[6]'s velocity estimate is derived from
+  // these in Policy::buildObs(), so it inherits the same steps the simulator had.
+  w1 = roundf(w1 / VEL_QUANTUM) * VEL_QUANTUM;
+  w2 = roundf(w2 / VEL_QUANTUM) * VEL_QUANTUM;
+
+  vel1_ = w1;
+  vel2_ = w2;
 }
